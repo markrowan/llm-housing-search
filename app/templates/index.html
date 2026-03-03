@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Housing Search</title>
+    <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+    <main class="container">
+        <header class="hero">
+            <h1>Housing Search</h1>
+            <p>Convert a plain-text prompt into a targeted, polite scrape of Flatfox and Homegate.</p>
+        </header>
+
+        <section class="panel">
+            <form method="post" action="/search">
+                <div id="loading-overlay" class="loading-overlay" aria-hidden="true" hidden>
+                    <div class="loading-card">
+                        <div class="spinner"></div>
+                        <div>
+                            <p>Searching listings…</p>
+                            <div class="progress">
+                                <div class="progress-bar"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <label for="prompt">Prompt</label>
+                <textarea id="prompt" name="prompt" rows="3" required>{{ example_prompt }}</textarea>
+
+                <div class="row">
+                    <div class="field">
+                        <label for="max_listings">Max listings per site</label>
+                        <input
+                            id="max_listings"
+                            type="number"
+                            min="5"
+                            max="50"
+                            step="5"
+                            name="max_listings"
+                            value="10"
+                        />
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="field">
+                        <label for="min_price_chf">Min price (CHF)</label>
+                        <input
+                            id="min_price_chf"
+                            type="number"
+                            min="0"
+                            step="50"
+                            name="min_price_chf"
+                            value="{% if min_price_chf is not none %}{{ min_price_chf }}{% else %}1500{% endif %}"
+                        />
+                    </div>
+                    <div class="field">
+                        <label for="max_price_chf">Max price (CHF)</label>
+                        <input
+                            id="max_price_chf"
+                            type="number"
+                            min="0"
+                            step="50"
+                            name="max_price_chf"
+                            value="{% if max_price_chf is not none %}{{ max_price_chf }}{% else %}3000{% endif %}"
+                        />
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="field field-wide">
+                        <label for="openai_api_key">OpenAI API key (optional)</label>
+                        <input id="openai_api_key" type="password" name="openai_api_key" autocomplete="off" />
+                    </div>
+                </div>
+                <p class="hint">
+                    {% if llm_available %}
+                        LLM parsing and relevance ranking are enabled via an OpenAI API key.
+                    {% else %}
+                        Provide an OpenAI API key above or set <code>OPENAI_API_KEY</code> to enable LLM parsing and ranking.
+                        The app will otherwise use heuristics.
+                    {% endif %}
+                </p>
+                <div class="actions">
+                    <button id="run-search" type="submit">Run search</button>
+                    <span id="run-status" class="run-status" aria-live="polite"></span>
+                </div>
+            </form>
+        </section>
+        <script>
+            (function () {
+                const form = document.querySelector("form");
+                const overlay = document.getElementById("loading-overlay");
+                const button = document.getElementById("run-search");
+                const status = document.getElementById("run-status");
+                const progressBar = document.querySelector(".progress-bar");
+                if (!form || !overlay) return;
+                form.addEventListener("submit", async (event) => {
+                    event.preventDefault();
+                    overlay.hidden = false;
+                    overlay.setAttribute("aria-hidden", "false");
+                    overlay.classList.add("is-visible");
+                    if (button) {
+                        button.disabled = true;
+                        button.textContent = "Running search";
+                    }
+                    if (status) {
+                        status.textContent = "Searching listings…";
+                    }
+                    if (progressBar) {
+                        progressBar.style.width = "5%";
+                    }
+
+                    const formData = new FormData(form);
+                    let response;
+                    try {
+                        response = await fetch("/search/start", {
+                            method: "POST",
+                            body: formData,
+                        });
+                    } catch (err) {
+                        if (status) {
+                            status.textContent = "Failed to start search.";
+                        }
+                        if (button) {
+                            button.disabled = false;
+                            button.textContent = "Run search";
+                        }
+                        return;
+                    }
+
+                    if (!response.ok) {
+                        if (status) {
+                            status.textContent = "Failed to start search.";
+                        }
+                        if (button) {
+                            button.disabled = false;
+                            button.textContent = "Run search";
+                        }
+                        return;
+                    }
+
+                    const payload = await response.json();
+                    const jobId = payload.job_id;
+                    if (!jobId) {
+                        if (status) {
+                            status.textContent = "Search failed to start.";
+                        }
+                        if (button) {
+                            button.disabled = false;
+                            button.textContent = "Run search";
+                        }
+                        return;
+                    }
+
+                    const source = new EventSource(`/search/progress?job_id=${jobId}`);
+                    source.addEventListener("progress", (event) => {
+                        try {
+                            const data = JSON.parse(event.data);
+                            if (status && data.message) {
+                                status.textContent = data.message;
+                            }
+                            if (progressBar && typeof data.progress === "number") {
+                                const pct = Math.min(100, Math.max(5, data.progress * 100));
+                                progressBar.style.width = `${pct}%`;
+                            }
+                        } catch (err) {
+                            // Ignore malformed updates
+                        }
+                    });
+                    source.addEventListener("done", (event) => {
+                        source.close();
+                        window.location.href = `/search/result/${jobId}`;
+                    });
+                    source.addEventListener("error", () => {
+                        source.close();
+                        if (status) {
+                            status.textContent = "Search failed.";
+                        }
+                        if (button) {
+                            button.disabled = false;
+                            button.textContent = "Run search";
+                        }
+                    });
+                });
+            })();
+        </script>
+
+        {% if result %}
+        <section class="panel">
+            <h2>Parsed filters</h2>
+            <pre>{{ result.filters.model_dump_json(indent=2) }}</pre>
+            {% if result.notes %}
+                <div class="notes">
+                    {% for note in result.notes %}
+                        <p>{{ note }}</p>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        </section>
+
+        <section class="panel">
+            <h2>Results</h2>
+            {% for site in result.results %}
+                <div class="site-block">
+                    <h3>{{ site.site }}</h3>
+                    <p class="muted">Search URL: <a href="{{ site.search_url }}" target="_blank">{{ site.search_url }}</a></p>
+                    {% if site.listings %}
+                        {% set strong_listings = site.listings | selectattr("match_label", "equalto", "strong") | list %}
+                        {% set other_listings = site.listings | rejectattr("match_label", "equalto", "strong") | list %}
+
+                        {% if strong_listings %}
+                            <h4 class="section-title">Strong matches</h4>
+                            <div class="listing-grid">
+                                {% for listing in strong_listings %}
+                                    <article class="listing">
+                                        <div class="badge">Strong match</div>
+                                        <h4><a href="{{ listing.url }}" target="_blank">{{ listing.title or 'Listing' }}</a></h4>
+                                        <p class="meta">{{ listing.address or '' }}</p>
+                                        <ul>
+                                            <li>Price: {{ listing.price_chf or 'n/a' }} CHF</li>
+                                            <li>Rooms: {{ listing.rooms or 'n/a' }}</li>
+                                            <li>Area: {{ listing.area_sqm or 'n/a' }} m²</li>
+                                            <li class="relevance-score">
+                                                Relevance:
+                                                {% if listing.relevance_score is not none %}
+                                                    {{ "%.2f"|format(listing.relevance_score) }}
+                                                {% else %}
+                                                    n/a
+                                                {% endif %}
+                                            </li>
+                                        </ul>
+                                        {% if listing.intent_summary %}
+                                            <p class="intent-summary">
+                                                {{ listing.intent_summary }}
+                                            </p>
+                                        {% endif %}
+                                        {% if listing.duplicate_sites %}
+                                            <p class="muted">
+                                                Also listed on: {{ listing.duplicate_sites | join(", ") }}
+                                            </p>
+                                        {% endif %}
+                                        {% if listing.descriptions %}
+                                            <div class="desc">
+                                                {% for block in listing.descriptions %}
+                                                    <p>
+                                                        {% if block.language %}
+                                                            <span class="lang">{{ block.language }}</span>
+                                                        {% endif %}
+                                                        {{ block.text }}
+                                                    </p>
+                                                {% endfor %}
+                                            </div>
+                                        {% endif %}
+                                    </article>
+                                {% endfor %}
+                            </div>
+                        {% endif %}
+
+                        {% if other_listings %}
+                            <h4 class="section-title">You may also like</h4>
+                            <div class="listing-grid">
+                                {% for listing in other_listings %}
+                                    <article class="listing">
+                                        <h4><a href="{{ listing.url }}" target="_blank">{{ listing.title or 'Listing' }}</a></h4>
+                                        <p class="meta">{{ listing.address or '' }}</p>
+                                        <ul>
+                                            <li>Price: {{ listing.price_chf or 'n/a' }} CHF</li>
+                                            <li>Rooms: {{ listing.rooms or 'n/a' }}</li>
+                                            <li>Area: {{ listing.area_sqm or 'n/a' }} m²</li>
+                                            <li class="relevance-score">
+                                                Relevance:
+                                                {% if listing.relevance_score is not none %}
+                                                    {{ "%.2f"|format(listing.relevance_score) }}
+                                                {% else %}
+                                                    n/a
+                                                {% endif %}
+                                            </li>
+                                        </ul>
+                                        {% if listing.intent_summary %}
+                                            <p class="intent-summary">
+                                                {{ listing.intent_summary }}
+                                            </p>
+                                        {% endif %}
+                                        {% if listing.duplicate_sites %}
+                                            <p class="muted">
+                                                Also listed on: {{ listing.duplicate_sites | join(", ") }}
+                                            </p>
+                                        {% endif %}
+                                        {% if listing.descriptions %}
+                                            <div class="desc">
+                                                {% for block in listing.descriptions %}
+                                                    <p>
+                                                        {% if block.language %}
+                                                            <span class="lang">{{ block.language }}</span>
+                                                        {% endif %}
+                                                        {{ block.text }}
+                                                    </p>
+                                                {% endfor %}
+                                            </div>
+                                        {% endif %}
+                                    </article>
+                                {% endfor %}
+                            </div>
+                        {% endif %}
+                    {% else %}
+                        <p>No listings parsed for this site (or blocked by robots.txt).</p>
+                    {% endif %}
+                </div>
+            {% endfor %}
+        </section>
+        {% endif %}
+    </main>
+</body>
+</html>
